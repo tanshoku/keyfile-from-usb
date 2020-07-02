@@ -1,0 +1,22 @@
+#!/bin/sh
+
+PREREQ=""
+HOOK_SOURCE="/home/liz/Documents/code/keyfile-from-usb/keyfile-from-usb"
+
+prereqs()
+{
+        echo "$PREREQ"
+}
+
+case $1 in
+# get pre-requisites
+prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+mkdir -p ${DESTDIR}/lib || true
+cp -pnL $HOOK_SOURCE ${DESTDIR}/lib/keyfile-from-usb
+chmod 755 ${DESTDIR}/lib/keyfile-from-usb

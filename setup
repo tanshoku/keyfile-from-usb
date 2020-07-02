@@ -1,0 +1,161 @@
+#!/bin/sh
+# Author:    Elizabeth Bodaneze                        Sep-2018
+# Requires:  sh, grep, sed, cryptsetup, grub
+# Usage:     ./setup -or- ./setup uninstall -or- ./setup update
+
+# change this to a less obvious name if you want a bit of security through obscurity, just don't lose it!
+keyfile_name=cryptkey
+
+# set this variable if you want a new key file to be generated when you run this script,
+# or leave it unset if you already have a keyfile
+generate_keyfile=
+
+# Files we need, change as needed, provided you know what you are doing
+cryptroot_script="/usr/share/initramfs-tools/scripts/local-top/cryptroot"
+crypttab="/etc/crypttab"
+grub_config="/etc/default/grub"
+initramfs_modules="/etc/initramfs-tools/modules"
+modules="ehci_pci uhci_hcd ehci_hcd usb_storage nls_cp437 vfat fat sd_mod mmc_core scsimod usbcore nls_ascii"
+initramfs_hooks_dir="/usr/share/initramfs-tools/hooks"
+
+
+kffusb_parse_crypttab() {
+  _IFS=$IFS
+  IFS=" ,"
+  for option in $@; do
+    case $option in
+      *"crypt")  CRYPTTAB_NAME=$option      ;;
+      "UUID"*)   CRYPTTAB_SOURCE=$option    ;;
+      "none")    CRYPTTAB_KEY=$keyfile_name ;;
+      "luks")    TYPE=luks                  ;;
+      "discard") DISCARD=,discard           ;;
+    esac
+  done
+  IFS=$_IFS
+  # We don't know how to deal with non-luks partitions,
+  # so we better avoid a screw-up
+  ! [ $TYPE = luks ] && exit 1
+}
+
+
+kffusb_patch_grub() {
+  grub_kernel_line=$(grep "GRUB_CMDLINE_LINUX=" $grub_config)
+
+  grub_kernel_line_patched=$(printf "%s" "$grub_kernel_line"\
+  | sed "s/cryptopts.*[\" ]//"
+  printf "cryptopts=source=%s," "$CRYPTTAB_SOURCE"
+  printf "target=%s," "$CRYPTTAB_NAME"
+  printf "keyscript=/lib/keyfile-from-usb,"
+  printf "key=%s," "$CRYPTTAB_KEY"
+  printf "%s" "$TYPE"
+  printf "%s" "$DISCARD"
+  printf "\"")
+
+  grub_kernel_line_patched=$(echo $grub_kernel_line_patched | sed 's/\"/\\"/g')
+
+  # Debugging stuff...
+  # echo $grub_kernel_line_patched
+  # echo $grub_kernel_line
+
+  printf "\n\n"
+
+  sed "s|GRUB_CMDLINE_LINUX=.*|$grub_kernel_line_patched|" $grub_config
+
+  printf "\n\n"
+
+  printf "Is this correct? [Y/n] "
+  read var
+
+  var=$(printf "%s" "$var" | tr -t '[:upper:]' '[:lower:]')
+
+  if [ -z "$var" ] || [ "$var" = "yes" ] || [ "$var" = "y" ]; then
+    sed "s|GRUB_CMDLINE_LINUX=.*|$grub_kernel_line_patched|" $grub_config > /tmp/keyfile_grub_config
+  else
+    exit 1
+  fi
+}
+
+
+kffusb_install() {
+  printf "\e[1m*\e[0m Creating backups...\n"
+  [ -d backups ] || mkdir backups
+  for i in $cryptroot_script $grub_config $initramfs_modules ; do
+    cp $i ./backups
+  done
+
+  printf "\e[1m*\e[0m Parsing \e[32m%s\e[0m and patching \e[32m%s\e[0m...\n" "$crypttab" "$grub_config"
+  kffusb_parse_crypttab $(cat $crypttab)
+  kffusb_patch_grub
+
+  if grep 'run_keyscript "$CRYPTTAB_KEY" "$count" | unlock_mapping' $cryptroot_script > /dev/null ; then
+    printf "\e[1m*\e[0m Patching \e[32m%s\e[0m...\n" "$cryptroot_script"
+    sed 's/run_keyscript "$CRYPTTAB_KEY" "$count" | unlock_mapping/run_keyscript "$CRYPTTAB_KEY" "$count"/' $cryptroot_script > /tmp/keyfile_cryptroot
+  else
+    printf "\e[1m*\e[91m%s not compatilbe!\e[0m\n" "$cryptroot_script"
+    exit 1
+  fi
+
+  printf "\e[1m*\e[0m Patching \e[32m%s\e[0m...\n" "$initramfs_modules"
+  grep -v '#' $initramfs_modules > /tmp/keyfile_initramfs_modules
+  for i in $modules; do
+    echo $i >> /tmp/keyfile_initramfs_modules
+  done
+  sort -u /tmp/keyfile_initramfs_modules > /tmp/keyfile_initramfs_modules.2
+  grep '#' $initramfs_modules > /tmp/keyfile_initramfs_modules
+  cat /tmp/keyfile_initramfs_modules.2 >> /tmp/keyfile_initramfs_modules
+
+  printf "\e[1m*\e[0m Adding initramfs hook...\n"
+  sed -i "4s|HOOK_SOURCE.*|HOOK_SOURCE=\"$PWD/keyfile-from-usb\"|" keyfile-from-usb.hook
+  sudo cp keyfile-from-usb.hook /usr/share/initramfs-tools/hooks
+  sudo chmod 755 /usr/share/initramfs-tools/hooks/keyfile-from-usb.hook
+
+  printf "\e[1m*\e[0m Commiting changes...\n"
+  sudo cp /tmp/keyfile_grub_config $grub_config
+  sudo cp /tmp/keyfile_cryptroot $cryptroot_script
+  sudo cp /tmp/keyfile_initramfs_modules $initramfs_modules
+  sudo update-initramfs -u
+  sudo update-grub
+
+  if [ -n "$generate_keyfile" ] && [ -z "$update" ] ; then
+    printf "\e[1m*\e[0m Generating keyfile (\e[32m%s\e[0m)...\n" "$keyfile_name"
+    dd if=/dev/urandom of=$keyfile_name bs=1024 count=4
+
+    printf "\e[1m*\e[0m Adding keyfile to luks keyring...\n"
+    sudo cryptsetup luksAddKey $CRYPTTAB_SOURCE $keyfile_name
+  fi
+}
+
+
+kffusb_uninstall() {
+  printf "\e[1m*\e[0m Restoring backups...\n"
+  for i in $cryptroot_script $grub_config $initramfs_modules ; do
+	  parse_crypttab $(cat $crypttab)
+	  backup_file="./backups/$(basename $i)"
+	  sudo cp "$backup_file" "$i"
+	  sudo rm /usr/share/initramfs-tools/hooks/keyfile-from-usb.hook
+	  sudo cryptsetup luksRemoveKey $CRYPTTAB_SOURCE $keyfile_name
+	done
+}
+
+
+# First and foremost, check if our files exist
+for i in $cryptroot_script $crypttab $grub_config $initramfs_modules $initramfs_hooks_dir ; do
+  if ! [ -e $i ] ; then
+    printf "\e[1m* \e[91m%s not found!\e[0m\n" "$i"
+    exit 1
+  fi
+done
+
+if [ "$1" = "install" ] ||  [ -z "$1" ]; then
+  sudo -v
+  kffusb_install
+elif [ "$1" = "update" ]; then
+  sudo -v
+  update=1
+  kffusb_install
+elif [ "$1" = "uninstall" ]; then
+  sudo -v
+  kffusb_uninstall
+else
+  echo "Invalid option $*"
+fi

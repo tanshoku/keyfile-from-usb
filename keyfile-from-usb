@@ -1,0 +1,68 @@
+#!/bin/sh
+# see README.md for more information
+# Elizabeth Bodaneze Aug-2018 
+
+fallback_input() {
+  #fallback to manual passphrase input
+  /lib/cryptsetup/askpass "Enter passphrase for $CRYPTTAB_SOURCE:" | cryptsetup $cryptsetup_options
+}
+
+
+#parse cryptsetup options
+cryptsetup_options="open"
+_IFS=$IFS
+IFS=,
+for option in $CRYPTTAB_OPTIONS; do
+  case $option in
+    "discard") cryptsetup_options="$cryptsetup_options --allow-discards" ;;
+    "luks") cryptsetup_options="$cryptsetup_options --type luks $CRYPTTAB_SOURCE $CRYPTTAB_NAME" ;;
+    # add other options here as needed
+    "*") ;;
+  esac
+done
+IFS=$_IFS
+
+set -e
+
+if ! [ -e /passphrase-from-usb-tried ]; then
+#so we dont get caught in a loop
+  touch /passphrase-from-usb-tried
+  #echo "Waiting for USB stick to be recognized..." >&2
+  sleep 1
+  # Test all devices
+  mkdir -p /tmp/mnt
+  #echo "Searching for $CRYPTTAB_KEY on available disks... " >&2
+
+  for partition in $(awk '{print $4}' /proc/partitions | tail -n +3); do
+    #printf "Trying /dev/$partition" >&2
+    if mount /dev/$partition /tmp/mnt/ 2> /dev/null ; then
+      cp "/tmp/mnt/$CRYPTTAB_KEY" /tmp/cryptkey 2>/dev/null
+      #if cp "/tmp/mnt/$CRYPTTAB_KEY" /tmp/cryptkey 2>/dev/null; then
+        #echo " <- Found keys on $CRYPTTAB_KEY" >&2
+      #else echo >&2
+      #fi
+    umount /dev/$partition
+    #else echo >&2
+    fi
+  done
+
+  #echo "Done searching." >&2
+
+  if [ -e /tmp/cryptkey ] ; then
+  #echo "Trying key in $CRYPTTAB_KEY"  >&2
+    if ! cryptsetup $cryptsetup_options --key-file=/tmp/cryptkey >&2; then
+      # Found the key
+      #echo "Key found in $CRYPTTAB_KEY" >&2
+    #else
+     fallback_input
+    fi
+    # Remove traces of the key
+    rm /tmp/cryptkey
+  else
+    fallback_input
+  fi
+
+  exit
+else
+  fallback_input
+fi

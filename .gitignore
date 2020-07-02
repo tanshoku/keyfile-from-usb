@@ -1,0 +1,6 @@
+#ignore dirs
+backup/
+
+#don't upload the keyfile to github =)
+cryptkey.txt
+cryptkey
